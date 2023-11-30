@@ -1,0 +1,153 @@
+/// @title YAC3F - Yet Another Create3 Factory 
+/// @notice SPDX-License-Identifier: MIT
+/// @author @radeksvarz (@radk)
+/// @notice Deploy to deterministic addresses without an initcode or nonce factor
+/// @notice Inspired by Huffmate (https://github.com/huff-language/huffmate/blob/main/src/utils/CREATE3.huff)
+/// @notice Inspired by SKYBIT (https://github.com/SKYBITDev3/SKYBIT-Keyless-Deployment/blob/main/contracts/SKYBITCREATE3FactoryLite.yul)
+///
+/// Either deploys provided contract towards calculated address based on msg.sender and salt or reverts.
+///
+/// Assumptions:
+/// - Address(0).code.length = 0
+/// - Following opcodes in Contract Init code do not create runtime on target address:
+///     INVALID, REVERT, STOP, RETURN(0,0), i.e. target address.code.length == 0 in these cases
+/// - CREATE returns data in case of init code reverts, but bubbling up the revert reason is omitted.
+///
+/// To be compiled with `huffc -e paris` switch if the factory bytecode equivalency is needed.
+///
+/// Usage: (bool status, bytes memory data) = address(<<factory address>>).call{value: value}(salt, bytecode);
+///        returns deployed contract's address or revert with DeploymentFailed error
+
+// No Interface
+// Direcly callable using address(<<factory address>>).call{value: value}(salt, bytecode);
+
+// Errors
+#define error DeploymentFailed() // selector .. 0x30116425, Huff compiles to PUSH32 bytes32 padded by 0
+#define constant DEPLOYMENT_FAILED_SELECTOR = 0x30116425 // Therefore we use this 4B constant
+
+// No Storage Slots
+
+// No CONSTRUCTOR() macro as huffc creates the default one with corresponding code length
+// 0x60XX8060093d393df3
+// PUSH1 codelenth DUP1 PUSH1 runtimecode offset = 09 RDS = 0 CODECOPY RDS = 0 RETURN
+
+// Create Proxy Constant
+#define constant CREATE_PROXY_BYTECODE = 0x6E363d3d3760203d363d34f0600052f33d52600f6011f3
+
+// Proxy contract that creates provided contract in calldata and returns address  //
+//--------------------------------------------------------------------------------//
+// Init code                                                                      //
+//--------------------------------------------------------------------------------//
+// Opcode     | Opcode + Arguments    | Description      | Stack View             //
+//--------------------------------------------------------------------------------//
+// 0x6e       |  0x6EXXXXXXXXXXXXXXXX | PUSH15 runtime   | runtimecode            //
+// 0x3d       |  0x3d                 | RETURNDATASIZE   | 0 runtimecode          //
+// 0x52       |  0x52                 | MSTORE           |                        //
+// 0x60       |  0x600f               | PUSH1 0f         | 15                     //
+// 0x60       |  0x6011               | PUSH1 11         | 17 15                  //
+// 0xf3       |  0xf3                 | RETURN           |                        //
+//--------------------------------------------------------------------------------//
+// Runtime code                                                                   //
+//--------------------------------------------------------------------------------//
+// Opcode     | Opcode + Arguments    | Description      | Stack View             //
+//--------------------------------------------------------------------------------//
+// 0x36       |  0x36                 | CALLDATASIZE     | size                   //
+// 0x3d       |  0x3d                 | RETURNDATASIZE   | 0 size                 //
+// 0x3d       |  0x3d                 | RETURNDATASIZE   | 0 0 size               //
+// 0x37       |  0x37                 | CALLDATACOPY     |                        //
+// 0x60       |  0x6020               | PUSH1 20         | 32                     //
+// 0x3d       |  0x3d                 | RETURNDATASIZE   | 0 32                   //
+// 0x36       |  0x36                 | CALLDATASIZE     | size 0 32              //
+// 0x3d       |  0x3d                 | RETURNDATASIZE   | 0 size 0 32            //
+// 0x34       |  0x34                 | CALLVALUE        | value 0 size 0 32      //
+// 0xf0       |  0xf0                 | CREATE           | newContract 0 32       //
+// 0x60       |  0x6000               | PUSH1 0          | 0 newContract 0 32     //
+// 0x52       |  0x52                 | MSTORE           | 0 32                   //
+// 0xf3       |  0xf3                 | RETURN           |                        //
+//--------------------------------------------------------------------------------//
+// note: RDS, PUSH1 0 instead of PUSH0 kept for compatibility accross chains.     //
+//       CREATE returns data in case of init code revert, but that is omitted.    //
+
+#define macro MAIN() = takes (0) returns (0) {
+    
+    // Save for resulting return and other usage
+    0x20                            // [0x20]
+    returndatasize                  // [0, 0x20]
+
+    // Hash provided salt with msg.sender to prevent front-running, creating namespace for each caller.
+    caller                          // [caller, 0, 0x20] // 32B, only 20 bytes relevant, padded w/ 0
+    dup3                            // [0x20, caller, 0, 0x20]
+    mstore                          // [0, 0x20] mem 0x20..3f: caller address
+    returndatasize calldataload     // [salt, 0, 0x20] // 32B salt from calldata 0..1f
+    returndatasize mstore           // [0, 0x20] mem 0x0..3f: salt, caller
+    0x40 returndatasize             // [0, 0x40, 0, 0x20] // 64B long to keccak
+    sha3                            // [_salt, 0, 0x20] // _salt = keccak256(salt, msg.sender)
+
+    // Deploy Create proxy
+    [CREATE_PROXY_BYTECODE]         // [proxy bytecode, _salt, 0, 0x20] // bytecode length 23B, rightpadded 
+    returndatasize mstore           // [_salt, 0, 0x20] mem 0x0..0x08: 0..0, 0x09..1f: bytecode 
+    0x17                            // [size = 23, _salt, 0, 0x20]
+    0x09 returndatasize             // [value = 0, offset = 0x09, size, _salt, 0, 0x20]
+    create2                         // [address, 0, 0x20] address of the deployed create proxy, 0x0 if the deployment failed.
+
+    // Check the address of the Create proxy is not zero address
+    dup1                            // [address, address, 0, 0x20]
+    iszero                          // [address==0 ? 1:0, address, 0, 0x20]
+    // Reverts with error DeploymentFailed() when deployment of the Create proxy fails
+    deployment_failed jumpi         // [0x0, 0, 0x20] // create proxy address was 0
+
+    // proxy_deployment_passed:        // [address, 0, 0x20] // create proxy address != 0
+    // Clean mem slot 0 for resulting address check.
+    returndatasize returndatasize   // [0, 0, address, 0, 0x20]
+    mstore                          // [address, 0, 0x20] mem 0x0..1f: 0x0..0
+
+    // Add return memory offset position for call
+    returndatasize                  // [retOffset = 0, address, 0, 0x20]
+
+    // Load the size of the creation code in calldata skipping first 32B of salt
+    dup4                            // [0x20, 0, address, 0, 0x20]
+    calldatasize                    // [wholesize, 0x20, 0, address, 0, 0x20]
+    sub                             // [size, 0, address, 0, 0x20]
+
+    // Copy the code from calldata to memory at memory position 0x20
+    dup1                            // [size, size, 0, address, 0, 0x20] // saving size for call
+    dup6                            // [0x20, size, size, 0, address, 0, 0x20]
+    dup1                            // [0x20, 0x20, size, size, 0, address, 0, 0x20]
+    calldatacopy                    // [size, 0, address, 0, 0x20] mem 0x0..1f: 0..0; 0x20+: bytecode
+
+    // Call the Create proxy with the creation bytecode
+    //                              // [argSize = size, retOffset = 0, address, 0, 0x20]
+    dup5                            // [argOffset = 0x20, argSize, retOffset, address, 0, 0x20] // start of contract code 
+    callvalue                       // [value, argOffset, argSize, retOffset, address, 0, 0x20]
+    dup7                            // [retSize = 0x20, value, argOffset, argSize, retOffset, address, 0, 0x20] // resulting address is 20B long, but padded to 32B
+    swap5                           // [address, value, argOffset, argSize, retOffset, retSize, 0, 0x20]      
+    gas                             // [gas, address, value, argOffset = 0x20, argSize, retOffset = 0, retSize = 0x20, 0, 0x20]    
+    call                            // [success, 0, 0x20] // 0 if the sub context reverted, 1 otherwise.
+                                    // note: create proxy does not revert even when deploying init code reverts
+                                    // mem 0x0..0x1f: final contract address or 0x0
+
+    // Omit success handling as YAC3F CREATE has no revert (i.e. success = 1), 
+    // however success can be 0 in case of not enough gas (STATICCALL case would revert during CREATE2 earlier).
+    // That results in 0x0 address anyway, which has test below.
+    pop                             // [0, 0x20]
+
+    // Check that the deployed code size != 0, i.e. there is a new runtime code deployed
+    // or resulting address is 0x0, which does not have any code either
+    // deployment_check:               // [0, 0x20]
+    dup1                            // [0, 0, 0x20]
+    mload                           // [new contract address, 0, 0x20] // or 0x0 address
+    extcodesize                     // [deployed code size, 0, 0x20] // valid also for 0x0 address
+    deployed_code_exists jumpi      // [0, 0x20]
+
+    // Reverts with error DeploymentFailed()
+    deployment_failed:              // [0x0, 0, 0x20] | [0, 0x20] ~ [0, ...]
+        [DEPLOYMENT_FAILED_SELECTOR]// [DeploymentFailed() error_selector, 0, ...]
+        swap1                       // [0, error_selector, ...]
+        mstore                      // mem 0x1c..0x1f: DeploymentFailed() selector
+        0x04 0x1c                   // [offset = 28, size = 4, ...] mem 0x1c..1f: error selector
+        revert                      // [...] not used
+
+    deployed_code_exists:           // [0, 0x20]
+        // Return the address (20B, padded to 32B) of the deployed contract
+        return                      // [] mem and returndata: 0x0..0x1f: final contract address
+}

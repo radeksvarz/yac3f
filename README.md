@@ -1,66 +1,132 @@
-## Foundry
+# YAC3F (Yet Another CREATE3 Factory)
 
-**Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**
+Easy to use deployment approach and byte-exact CREATE3 factory contract for deterministic deployment of custom contracts to the same address on multiple EVM chains.
 
-Foundry consists of:
+## What is it good for?
 
--   **Forge**: Ethereum testing framework (like Truffle, Hardhat and DappTools).
--   **Cast**: Swiss army knife for interacting with EVM smart contracts, sending transactions and getting chain data.
--   **Anvil**: Local Ethereum node, akin to Ganache, Hardhat Network.
--   **Chisel**: Fast, utilitarian, and verbose solidity REPL.
+Ensuring that contracts have the same deterministic address across multiple chains has the following benefits
 
-## Documentation
+- **No configuration issues:** Streamlined deployment with no configuration hassles.
+- **Improved phishing spam detection:** Enables users/wallets to better detect phishing attempts, increasing security.
+- **User-facing contracts:** Ideal for user-facing contracts such as ERC20 tokens.
+- **Singleton Contracts:** Facilitates the creation of singleton contracts for consistent accessibility across chains (registries such as 1820, AA, ...).
 
-https://book.getfoundry.sh/
+# Using YAC3F factory contract to deploy your own contract
 
-## Usage
+## Within your Foundry deployment script
 
-### Build
+**Deploy the contract in your Foundry script**
 
-```shell
-$ forge build
+```solidity
+// Returns the address of the deployed contract or DeploymentFailed error
+
+(bool status, bytes memory data) = address(<<factory address>>).call{value: value}(salt, bytecode);
+
+require(status, "Deployment failed");
+require(data.length == 32); // no way to fail, just to make sure
+address myContractAddress = address(uint160(uint256(bytes32(data))));
 ```
 
-### Test
+**To predict your contract address in advance**
 
-```shell
-$ forge test
+```solidity
+import {DeriveAddress} from "../script/utils/DeriveAddress.sol";
+
+address expectedAddressOfMyContract = DeriveAddress.fromYAC3F(salt, sender, <<YAC3F factory address>>);
 ```
 
-### Format
+## Via EOA call (e.g. in Remix, from CLI)
 
-```shell
-$ forge fmt
+Call deployed YAC3F factory with this calldata:
+
+```
+0x<32B salt><own contract's bytecode>
 ```
 
-### Gas Snapshots
+# Deployment of the YAC3F factory
 
-```shell
-$ forge snapshot
+## Signing the YAC3F deployment transaction (public good)
+
+> [!IMPORTANT]
+>
+> As a public good, it is crucial that the YAC3F can be deployed to the same address in any EVM chain (including future ones). I.e. we - the community - MUST find a way to design the signing procedure to achieve this goal.
+>
+> Everyone is welcome to discuss the viable solutions here: https://t.me/YAC3F
+
+## Chains where YAC3F is already deployed
+
+- WILL BE LISTED as soon as a consensus is reached on the signing / PK keeping mechanism.
+
+## Individual deployment
+
+Individual deployment of the factory is already possible for projects. This will result in a similar situation as Axelar and Layer Zero have, i.e. such a project has the power and responsibility to deploy the factory to any EVM chains it prefers.
+
+This also means that the project cannot use the fruits of the community's deployments and the reuse of such a deployed factory is limited - see [FAQ - other CREATE3 factories](#there-are-other-create3-factories,-why-yet-another-one?).
+
+An "own" deployment can be done as follows in your script:
+
+```solidity
+import {deployBytecode} from "../script/utils/DeployBytecode.sol";
+import {YAC3F_BYTECODE} from "../script/utils/YAC3F.g.sol";
+import {IYAC3F} from "../src/interfaces/IYAC3F.sol";
+
+IYAC3F create3Factory = IYAC3F(deployBytecode(YAC3F_BYTECODE));
 ```
 
-### Anvil
+# FAQ
 
-```shell
-$ anvil
+## There are other CREATE3 factories, why another one?
+
+Some CREATE3 factories are only deployed on certain chains. The decision to deploy to other chains is made by the respective project (e.g. Axelar, Layer Zero - thanks for the inspiration!). Such projects also manage private keys used to deploy their CREATE3 factory. The result is that such factories are not available on every chain, and cannot be deployed to such chains in a timely manner.
+
+Some CREATE3 factories are deployed keylessly, using the technique of replaying already signed (legacy) transaction on the new chain.
+There are chains that do not allow tx replay. The result is that such factories cannot exist on such chains, or the chain creator must be persuaded to make the exception and pre-deploy the factory in the legacy transaction.
+
+## Why is the factory written in Huff? Why not Solidity?
+
+The bytecode of the factory must be exactly the same to ensure determinism and the same resulting addresses of deployed contracts.
+
+The Solidity compiler introduces changes over time with evolving versions (cfr 0.8.19 -> 0.8.20 when PUSH0 was introduced). And also other non-compilation related changes (e.g. in comments) result in different bytecode (cfr cbor and bytecodehash).
+
+## Why is the factory written in Huff? Why not Yul?
+
+The bytecode of the factory must be exactly the same in order to provide deterministic and equal resulting addresses of the deployed contracts.
+
+The Yul compiler has a higher level of abstraction with optimisations that lead to unexpected bytecode results.
+Huff is more low-level, where even stack handling could have been further optimised.
+
+## Do I need the Huff compiler to use YAC3F?
+
+No. The YAC3F huff code comes with extensive comments to help you understand what it does.
+
+There is the compiled byte code in `script/utils/YAC3F.g.sol` if needed.
+
+If you want to compare the result of the Huff code and the already generated bytecode, you are welcome to compile YAC3F.huff with
+
+```bash
+huffc src/YAC3F.huff -e paris -b
 ```
 
-### Deploy
+## Do I need the Huff x Foundry library or its template?
 
-```shell
-$ forge script script/Counter.s.sol:CounterScript --rpc-url <your_rpc_url> --private-key <your_private_key>
-```
+No.
 
-### Cast
+You do not need https://github.com/huff-language/foundry-huff to deploy your Solidity contracts using YAC3F.
 
-```shell
-$ cast <subcommand>
-```
+If you want to compile the huff code yourself, the huff compiler is sufficient.
 
-### Help
+# License
 
-```shell
-$ forge --help
-$ anvil --help
-$ cast --help
-```
+MIT
+
+# Disclaimer
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+_The smart contracts have not been audited, yet and as such there can be no assurance they will work as intended, and users may experience delays, failures, errors, omissions, loss of transmitted information or loss of funds. The creators are not liable for any of the foregoing. Users should proceed with caution and use at their own risk._
